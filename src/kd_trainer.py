@@ -108,13 +108,21 @@ class CorpusKDTrainer(SFTTrainer):
         student_logits = outputs.logits   # (B, T, V)
 
         # ── Teacher forward (gradient 없음) ───────────────────────────────────
-        # 티처는 각 rank의 전용 CUDA 장치에 완전히 로드되어 있으므로
-        # ZeRO3 GatheredParameters 불필요 — 직접 forward만 수행한다.
+        # zero3_init_flag: true 환경에서는 teacher 파라미터도 ZeRO-3에 의해
+        # 1D shard로 파티셔닝된다. GatheredParameters로 full 텐서를 복원한 뒤
+        # forward를 수행하고, 완료 후 다시 파티션 상태로 반환한다.
         teacher_device = next(self.teacher_model.parameters()).device
         cuda_inputs = {k: v.to(teacher_device) if isinstance(v, torch.Tensor) else v
                        for k, v in model_inputs.items()}
         with torch.no_grad():
-            teacher_outputs = self.teacher_model(**cuda_inputs)
+            if _HAS_DEEPSPEED:
+                with _deepspeed.zero.GatheredParameters(
+                    list(self.teacher_model.parameters()),
+                    modifier_rank=None,
+                ):
+                    teacher_outputs = self.teacher_model(**cuda_inputs)
+            else:
+                teacher_outputs = self.teacher_model(**cuda_inputs)
             teacher_logits = teacher_outputs.logits   # (B, T, V)
 
         # ── Temperature scaling (teacher logit) ───────────────────────────────
@@ -122,7 +130,6 @@ class CorpusKDTrainer(SFTTrainer):
             teacher_logits = teacher_logits / self.temperature
 
         # ── 유효 토큰 마스크 ──────────────────────────────────────────────────
-        # packing 환경에서는 labels != -100 인 위치만 loss 대상
         if labels is not None:
             mask = (labels != -100)   # (B, T)
         else:
@@ -132,51 +139,57 @@ class CorpusKDTrainer(SFTTrainer):
                 device=student_logits.device,
             )
 
-        if mask.sum() == 0:
-            # 유효 토큰이 전혀 없는 경우 (안전 처리)
+        n_valid = int(mask.sum())
+        if n_valid == 0:
             loss = student_logits.sum() * 0.0
             return (loss, outputs) if return_outputs else loss
 
-        # ── 확률 분포 계산 (log-space, 수치 안정성 확보) ─────────────────────
-        # BF16 환경에서 exp() 후 log()를 거치면 0 * (-inf) = NaN 발생.
-        # log-space KL: KL(P||M) = sum_v exp(log_P) * (log_P - log_M)
-        #   = sum_v P * log_P/M  (log-space에서 직접 계산)
-        # log_M = log(beta*exp(log_S) + (1-beta)*exp(log_T))
-        #       = log_S + log(beta + (1-beta)*exp(log_T - log_S))  (수치 안정)
-        s_log_prob = F.log_softmax(student_logits.float(), dim=-1)   # fp32로 계산
-        t_log_prob = F.log_softmax(teacher_logits.float(), dim=-1)
+        # ── 유효 토큰만 추출: (B,T,V) → (N,V) ──────────────────────────────
+        # (B,T,V) fp32 텐서를 동시에 여러 개 유지하면 ~42 GB 이상 소요됨.
+        # 유효 토큰(N)만 뽑아 (N,V)로 줄이고, 청크 단위로 JSD를 계산한다.
+        s_valid = student_logits[mask].float()          # (N, V)
+        t_valid = teacher_logits[mask].to(s_valid.device).float()  # (N, V)
         del student_logits, teacher_logits
 
-        # log_M = logsumexp trick으로 수치 안정하게 계산
-        # log(beta*S + (1-beta)*T) = log(sum_i w_i * exp(log_x_i))
-        log_weights = torch.stack(
-            [s_log_prob + torch.log(torch.tensor(self.beta, device=s_log_prob.device)),
-             t_log_prob + torch.log(torch.tensor(1.0 - self.beta, device=t_log_prob.device))],
-            dim=0,
-        )
-        m_log_prob = torch.logsumexp(log_weights, dim=0)   # (B, T, V)
-        del log_weights
+        # ── 청크 단위 JSD 계산 (메모리 절약) ──────────────────────────────────
+        # 청크 크기 512: 512 * 256000 * 4 byte ≈ 500 MB (텐서 3개 동시 → ~1.5 GB)
+        CHUNK = 512
+        log_beta = torch.log(torch.tensor(self.beta, device=s_valid.device, dtype=torch.float32))
+        log_1mb = torch.log(torch.tensor(1.0 - self.beta, device=s_valid.device, dtype=torch.float32))
 
-        # KL(S||M) = sum_v S*(log_S - log_M), KL(T||M) = sum_v T*(log_T - log_M)
-        kl_s = (s_log_prob.exp() * (s_log_prob - m_log_prob)).sum(dim=-1)   # (B, T)
-        kl_t = (t_log_prob.exp() * (t_log_prob - m_log_prob)).sum(dim=-1)   # (B, T)
-        del s_log_prob, t_log_prob, m_log_prob
+        jsd_chunks: list[torch.Tensor] = []
+        debug_kl_s = debug_kl_t = 0.0
 
-        jsd_per_token = self.beta * kl_s + (1.0 - self.beta) * kl_t   # (B, T)
+        for start in range(0, n_valid, CHUNK):
+            s_c = F.log_softmax(s_valid[start:start + CHUNK], dim=-1)   # (C, V)
+            t_c = F.log_softmax(t_valid[start:start + CHUNK], dim=-1)   # (C, V)
 
-        # ── 유효 토큰 평균 ────────────────────────────────────────────────────
-        loss = jsd_per_token[mask].mean()
+            # log_M = logsumexp(log_beta + log_S, log_(1-beta) + log_T)
+            m_c = torch.logaddexp(s_c + log_beta, t_c + log_1mb)         # (C, V)
 
-        # ── 디버그: 실제 JSD 값 로깅 (round 전) ────────────────────────────
+            kl_s_c = (s_c.exp() * (s_c - m_c)).sum(dim=-1)              # (C,)
+            kl_t_c = (t_c.exp() * (t_c - m_c)).sum(dim=-1)              # (C,)
+            jsd_chunks.append(self.beta * kl_s_c + (1.0 - self.beta) * kl_t_c)
+
+            if self.state.global_step % 10 == 0:
+                debug_kl_s += kl_s_c.sum().item()
+                debug_kl_t += kl_t_c.sum().item()
+
+            del s_c, t_c, m_c, kl_s_c, kl_t_c
+
+        del s_valid, t_valid
+        loss = torch.cat(jsd_chunks).mean()
+
+        # ── 디버그 로깅 ────────────────────────────────────────────────────
         if self.state.global_step % 10 == 0:
             import os
             if int(os.environ.get("LOCAL_RANK", 0)) == 0:
                 print(
                     f"[JSD DEBUG] step={self.state.global_step}  "
                     f"loss_raw={loss.item():.8f}  "
-                    f"mask_n={int(mask.sum())}  "
-                    f"kl_s_mean={kl_s[mask].mean().item():.8f}  "
-                    f"kl_t_mean={kl_t[mask].mean().item():.8f}",
+                    f"mask_n={n_valid}  "
+                    f"kl_s_mean={debug_kl_s / n_valid:.8f}  "
+                    f"kl_t_mean={debug_kl_t / n_valid:.8f}",
                     flush=True,
                 )
 
