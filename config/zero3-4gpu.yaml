@@ -1,0 +1,14 @@
+compute_environment: LOCAL_MACHINE
+debug: false
+enable_cpu_affinity: false
+distributed_type: DEEPSPEED
+deepspeed_config:
+  zero_stage: 3
+  zero3_save_16bit_model: true
+  zero3_init_flag: true
+  offload_param_device: cpu
+  offload_optimizer_device: cpu
+num_processes: 4
+mixed_precision: bf16
+num_machines: 1
+use_cpu: false

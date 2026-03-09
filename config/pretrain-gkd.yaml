@@ -1,0 +1,99 @@
+env:
+  WANDB_PROJECT: "LLM"
+  WANDB_RUN_GROUP: "corpus-kd-gemma3"
+  WANDB_WATCH: ""
+  TORCH_DISTRIBUTED_DEBUG: "OFF"
+  TORCHDYNAMO_VERBOSE: "1"
+  TORCHDYNAMO_DISABLE: "1"
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True,roundup_power2_divisions:[32:256,64:128,256:64,>:32]"
+  CUDA_DEVICE_ORDER: "PCI_BUS_ID"
+  OMP_NUM_THREADS: 2
+  HF_TOKEN: "${HF_TOKEN}"
+  WANDB_API_KEY: "c2a64f120e506eeb30b2e1b6cbf898101785406c"
+
+# ─── 모델 ─────────────────────────────────────────────────────────────────────
+model_name_or_path: "/PROJECT/0325120095_A/BASE/rex/LLM/models/input/google/gemma-3-4b-pt"
+output_dir: "/PROJECT/0325120095_A/BASE/rex/LLM/output/gemma-3-4b-pt/kd"
+
+# ─── 데이터 (로컬 /xtmp/ Arrow 데이터셋) ───────────────────────────────────────
+data_paths:
+  - "/PROJECT/0325120095_A/BASE/rex/LLM/data/jp1924_MultilingualCorpusInFinancialSector"
+  - "/PROJECT/0325120095_A/BASE/rex/LLM/data/ugiugi_korean_financial_corpus"
+
+validation_truncate: 500
+text_field: "sentence_ls"
+text_join_sep: "\n"
+
+# ─── 전처리 ────────────────────────────────────────────────────────────────────
+preprocessing_num_workers: 20
+preprocessing_batch_size: 1000
+max_length: 8192
+
+# ─── 학습 하이퍼파라미터 ──────────────────────────────────────────────────────
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4
+per_device_eval_batch_size: 1
+eval_accumulation_steps: 32
+num_train_epochs: 1
+
+learning_rate: 2.0e-6
+lr_scheduler_type: cosine
+warmup_ratio: 0.03
+weight_decay: 0
+optim: adamw_torch
+max_grad_norm: 1.0
+
+# ─── eval / save ──────────────────────────────────────────────────────────────
+do_train: true
+do_eval: true
+do_predict: false
+eval_on_start: true
+eval_strategy: "steps"
+eval_steps: 74
+save_strategy: "steps"
+save_steps: 74
+save_only_model: true
+torch_empty_cache_steps: 74
+
+# ─── 최적화 ────────────────────────────────────────────────────────────────────
+bf16: true
+tf32: true
+attn_implementation: flash_attention_2
+use_liger_kernel: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+torch_compile: false
+packing: true
+padding_free: false
+
+# ─── DataLoader ───────────────────────────────────────────────────────────────
+dataloader_prefetch_factor: 10
+dataloader_num_workers: 10
+
+# ─── Loss ─────────────────────────────────────────────────────────────────────
+# use_gkd=true 이면 loss_type은 무시되고 JSD loss 사용
+loss_type: "nll"
+
+# ─── Logging ─────────────────────────────────────────────────────────────────
+report_to: "wandb"
+logging_strategy: "steps"
+logging_steps: 1
+run_name: "corpus-kd"
+
+# ─── 기타 ────────────────────────────────────────────────────────────────────
+include_num_input_tokens_seen: true
+remove_unused_columns: false
+ddp_timeout: 18000000
+seed: 42
+
+# ─── LoRA (PiSSA) ─────────────────────────────────────────────────────────────
+use_peft: false
+
+# ─── Knowledge Distillation ───────────────────────────────────────────────────
+use_gkd: true
+
+gkd:
+  teacher_model_path: "/PROJECT/0325120095_A/BASE/rex/LLM/models/input/checkpoint-63"
+  beta: 0.5        # 0.0=forward KL, 0.5=symmetric JSD, 1.0=reverse KL
+  temperature: 1.0 # 교사 softmax 온도

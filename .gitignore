@@ -1,0 +1,32 @@
+# Virtual environments
+venv/
+venv2/
+kmmlu/
+tmp_build/
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.eggs/
+
+# Large data / model weights
+data/
+models/
+output/
+lm-evaluation-harness/
+
+# Training logs & artifacts
+logs/
+wandb/
+*.log
+
+# Secrets
+git.key
+.env
+
+# OS
+.DS_Store
+*.swp
+
+# Jupyter
+.ipynb_checkpoints/

@@ -1,0 +1,122 @@
+env:
+  WANDB_PROJECT: "LLM"
+  WANDB_RUN_GROUP: "corpus-gold-gemma3-qwen3"
+  WANDB_WATCH: ""
+  TORCH_DISTRIBUTED_DEBUG: "OFF"
+  TORCHDYNAMO_VERBOSE: "1"
+  TORCHDYNAMO_DISABLE: "1"
+  PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True,roundup_power2_divisions:[32:256,64:128,256:64,>:32]"
+  CUDA_DEVICE_ORDER: "PCI_BUS_ID"
+  OMP_NUM_THREADS: 2
+  HF_TOKEN: "${HF_TOKEN}"
+  WANDB_API_KEY: "c2a64f120e506eeb30b2e1b6cbf898101785406c"
+
+# ─── 모델 ─────────────────────────────────────────────────────────────────────
+model_name_or_path: "/PROJECT/0325120095_A/BASE/rex/LLM/models/input/google/gemma-3-4b-pt"
+output_dir: "/PROJECT/0325120095_A/BASE/rex/LLM/output/gemma-3-4b-pt/gold"
+
+# ─── 데이터 (로컬 /xtmp/ Arrow 데이터셋) ───────────────────────────────────────
+data_paths:
+  - "/xtmp/jp1924_MultilingualCorpusInFinancialSector"
+  - "/xtmp/ugiugi_korean_financial_corpus"
+
+validation_truncate: 500
+text_field: "sentence_ls"
+text_join_sep: "\n"
+
+# ─── 전처리 ────────────────────────────────────────────────────────────────────
+preprocessing_num_workers: 20
+preprocessing_batch_size: 1000
+max_length: 4096
+
+# ─── 학습 하이퍼파라미터 ──────────────────────────────────────────────────────
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 2
+per_device_eval_batch_size: 1
+eval_accumulation_steps: 8
+num_train_epochs: 1
+
+learning_rate: 2.0e-6
+lr_scheduler_type: cosine
+warmup_ratio: 0.03
+weight_decay: 0
+optim: paged_adamw_32bit
+max_grad_norm: 1.0
+
+# ─── eval / save ──────────────────────────────────────────────────────────────
+do_train: true
+do_eval: true
+do_predict: false
+eval_on_start: false
+eval_strategy: "steps"
+eval_steps: 100
+save_strategy: "steps"
+save_steps: 200
+save_only_model: true
+load_best_model_at_end: false
+torch_empty_cache_steps: 100
+
+# ─── 최적화 ────────────────────────────────────────────────────────────────────
+bf16: true
+tf32: true
+attn_implementation: flash_attention_2
+use_liger_kernel: true
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+torch_compile: false
+packing: true
+padding_free: false
+
+# ─── DataLoader ───────────────────────────────────────────────────────────────
+dataloader_prefetch_factor: 4
+dataloader_num_workers: 4
+
+# ─── Loss ─────────────────────────────────────────────────────────────────────
+loss_type: "nll"
+
+# ─── Logging ─────────────────────────────────────────────────────────────────
+report_to: "wandb"
+logging_strategy: "steps"
+logging_steps: 1
+run_name: "corpus-gold"
+
+# ─── 기타 ────────────────────────────────────────────────────────────────────
+include_num_input_tokens_seen: true
+remove_unused_columns: false
+ddp_timeout: 18000000
+seed: 42
+
+# ─── LoRA (PiSSA) ─────────────────────────────────────────────────────────────
+use_peft: true
+lora_task_type: CAUSAL_LM
+lora_r: 128
+lora_alpha: 256
+lora_dropout: 0
+lora_target_modules: "all-linear"
+use_rslora: false
+lora_init_weights: "pissa_niter_4"
+
+# ─── GOLD Knowledge Distillation (Plan 3) ─────────────────────────────────────
+# Student: google/gemma-3-4b-pt  (Gemma3 tokenizer, vocab 256,000)
+# Teacher: Qwen/Qwen3.5-9B-Base  (Qwen3  tokenizer, vocab 151,936)
+# → 크로스-토크나이저: ULD (sorted L1) loss 사용
+use_gold: true
+
+gold:
+  teacher_model_path: "/PROJECT/0325120095_A/BASE/rex/LLM/models/input/Qwen/Qwen3.5-9B-Base"
+  teacher_tokenizer_path: "/PROJECT/0325120095_A/BASE/rex/LLM/models/input/Qwen/Qwen3.5-9B-Base"
+
+  use_uld_loss: true
+  uld_crossentropy_weight: 0.5
+  uld_distillation_weight: 1.0
+  uld_student_temperature: 1.0
+  uld_teacher_temperature: 1.0
+  uld_skip_student_eos: true
+  uld_skip_teacher_eos: true
+
+  uld_use_hybrid_loss: false
+  uld_hybrid_matched_weight: 1.0
+  uld_hybrid_unmatched_weight: 1.0
+
+  uld_top_k: 10000

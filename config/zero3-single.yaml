@@ -1,0 +1,16 @@
+# 단일 서버 (1 Node) Accelerate + DeepSpeed ZeRO3 설정
+# NVIDIA B200 183GB × 8, NVLink
+compute_environment: LOCAL_MACHINE
+debug: false
+enable_cpu_affinity: false
+distributed_type: DEEPSPEED
+deepspeed_config:
+  zero_stage: 3
+  zero3_save_16bit_model: true
+  zero3_init_flag: true
+  offload_param_device: none
+  offload_optimizer_device: none
+num_processes: 8
+mixed_precision: bf16
+num_machines: 1
+use_cpu: false
