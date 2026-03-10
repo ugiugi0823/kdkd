@@ -3,7 +3,7 @@ BASE_DIR="/PROJECT/0325120095_A/BASE/rex/LLM"
 LOG_DIR="${BASE_DIR}/logs/eval"
 mkdir -p "$LOG_DIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-MODEL_PATH="${BASE_DIR}/output/gemma-3-4b-pt/kd/run_20260305_162921/final_model"
+MODEL_PATH="${BASE_DIR}/output/gemma-3-4b-pt/kd/run_20260310_002255/final_model"
 LOG_FILE="${LOG_DIR}/kmmlu-gkd-${TIMESTAMP}.log"
 
 echo "[GKD eval] START: $(date)" | tee "$LOG_FILE"
